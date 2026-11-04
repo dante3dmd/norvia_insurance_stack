@@ -7,7 +7,7 @@ class BaseLLMProvider(ABC):
     """Common contract for all language-model adapters used by the app."""
 
     @abstractmethod
-    def generate(self, prompt: str, **kwargs) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None, **kwargs) -> str:
         """Return a text answer for a prompt in the provider-specific format."""
         raise NotImplementedError
 

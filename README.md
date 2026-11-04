@@ -1,5 +1,13 @@
 # Norvia Insurance Stack
 
+## Seguridad de entradas y secretos
+
+La API acepta únicamente archivos PDF, TXT y MD de hasta 10 MiB (`MAX_UPLOAD_SIZE_BYTES`). Rechaza cargas vacías, verifica la firma PDF y valida que TXT/MD sean UTF-8 sin bytes NUL; el MIME persistido se deriva de la extensión admitida y no del header enviado por el cliente.
+
+Los documentos y las preguntas se envían como datos JSON no confiables, mientras que las reglas anti-injection viajan en un mensaje `system` separado. El modelo recibe instrucciones explícitas para no obedecer órdenes contenidas en documentos y citar solo evidencia recuperada. Es una mitigación en capas, no una garantía absoluta contra prompt injection; el flujo no expone herramientas ni acciones externas al modelo.
+
+Las credenciales se configuran mediante variables de entorno (`DATABASE_URL`, `POSTGRES_PASSWORD`, `LITELLM_API_KEY`/`OPENAI_API_KEY`). `.env.example` contiene solo valores de reemplazo, nunca claves reales; sustituye esos placeholders localmente y no subas `.env` al repositorio.
+
 ## Observabilidad
 
 La API y el worker exportan trazas OpenTelemetry a Phoenix (`http://localhost:6006` en el stack local). Los logs de aplicación se emiten como JSON e incluyen `trace_id` y `span_id` cuando hay una traza activa, para correlacionar eventos entre servicios.

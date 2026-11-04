@@ -16,7 +16,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-norvia}
       POSTGRES_USER: ${POSTGRES_USER:-norvia}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-norvia_secure_pass}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -69,7 +69,8 @@ services:
     env_file:
       - .env
     environment:
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://phoenix:4317
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
     depends_on:
       postgres:
         condition: service_healthy
@@ -90,7 +91,8 @@ services:
     env_file:
       - .env
     environment:
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://phoenix:4317
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
     depends_on:
       postgres:
         condition: service_healthy

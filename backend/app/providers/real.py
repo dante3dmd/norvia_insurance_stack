@@ -24,7 +24,7 @@ class LiteLLMProvider(BaseLLMProvider):
         self.timeout = timeout
         self.last_usage: dict[str, int] = {}
 
-    def generate(self, prompt: str, **kwargs) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None, **kwargs) -> str:
         """Send a prompt to the configured chat-completions API and return the model text."""
         self.last_usage = {}
         if not self.api_key:
@@ -32,7 +32,10 @@ class LiteLLMProvider(BaseLLMProvider):
 
         payload = {
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": (
+                ([{"role": "system", "content": system_prompt}] if system_prompt else [])
+                + [{"role": "user", "content": prompt}]
+            ),
             **kwargs,
         }
         headers = {

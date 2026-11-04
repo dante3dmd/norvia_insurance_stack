@@ -6,7 +6,7 @@ from .base import BaseEmbeddingProvider, BaseLLMProvider
 class FakeLLMProvider(BaseLLMProvider):
     """Deterministic provider for offline development and tests."""
 
-    def generate(self, prompt: str, **kwargs) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None, **kwargs) -> str:
         normalized = prompt.strip()
         return f"Respuesta falsa para la consulta: {normalized}. Contexto local y determinista, sin red ni claves API."
 
