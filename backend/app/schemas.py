@@ -44,3 +44,38 @@ class ChatResponse(BaseModel):
     answer: str
     citations: list[Citation]
     has_sufficient_evidence: bool
+
+
+class DocumentSummary(BaseModel):
+    """A lightweight representation of a stored document and its ingest lifecycle state."""
+
+    id: str
+    filename: str
+    content_type: str
+    status: str
+    checksum: str
+    file_size: int
+    error_message: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class DocumentUploadResponse(BaseModel):
+    """Response returned immediately after a document is accepted for processing."""
+
+    id: str
+    filename: str
+    content_type: str
+    status: str
+    checksum: str
+    file_size: int
+    message: str
+
+
+class DocumentStatusResponse(BaseModel):
+    """Status endpoint payload for an individual ingested document."""
+
+    id: str
+    filename: str
+    status: str
+    error_message: str | None = None

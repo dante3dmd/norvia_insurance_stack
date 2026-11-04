@@ -1,23 +1,35 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.db.models import Document, DocumentStatus
 from app.db.session import AsyncSessionLocal, init_db
 from app.providers.factory import get_llm_provider
 from app.rate_limit import extract_user_id, rate_limiter
 from app.retriever import retrieve_chunks
-from app.schemas import ChatRequest, ChatResponse, Citation
+from app.schemas import (
+    ChatRequest,
+    ChatResponse,
+    Citation,
+    DocumentStatusResponse,
+    DocumentSummary,
+    DocumentUploadResponse,
+)
+from app.storage import save_document_file
+from worker.app.tasks import process_document_task
 
 
 def setup_telemetry() -> TracerProvider|None:
@@ -48,6 +60,104 @@ async def startup_event() -> None:
 async def healthz() -> dict[str, str]:
     """Simple liveness endpoint for container orchestration and smoke checks."""
     return {"status": "ok"}
+
+
+@app.post("/api/v1/documents/upload", response_model=DocumentUploadResponse)
+async def upload_document(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+) -> DocumentUploadResponse:
+    """Accept a document upload, persist it on disk, and enqueue the async ingest task."""
+    user_id = extract_user_id(authorization, x_user_id)
+    if not await rate_limiter.allow(user_id):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please retry later.")
+
+    file_bytes = await file.read()
+    filename = file.filename or "document.bin"
+    checksum = hashlib.sha256(file_bytes).hexdigest()
+    content_type = file.content_type or "application/octet-stream"
+
+    async with AsyncSessionLocal() as session:
+        existing = await session.execute(select(Document).where(Document.checksum == checksum))
+        existing_document = existing.scalar_one_or_none()
+        if existing_document is not None:
+            return DocumentUploadResponse(
+                id=existing_document.id,
+                filename=existing_document.filename,
+                content_type=existing_document.content_type,
+                status=existing_document.status.value,
+                checksum=existing_document.checksum,
+                file_size=existing_document.file_size,
+                message="Document already exists and is queued or processed.",
+            )
+
+        document = Document(
+            filename=filename,
+            content_type=content_type,
+            checksum=checksum,
+            file_size=len(file_bytes),
+            status=DocumentStatus.PENDING,
+        )
+        session.add(document)
+        await session.commit()
+        await session.refresh(document)
+
+    save_document_file(document.id, document.filename, file_bytes)
+    process_document_task.delay(document.id)
+    return DocumentUploadResponse(
+        id=document.id,
+        filename=document.filename,
+        content_type=document.content_type,
+        status=document.status.value,
+        checksum=document.checksum,
+        file_size=document.file_size,
+        message="Document accepted for ingestion.",
+    )
+
+
+@app.get("/api/v1/documents", response_model=list[DocumentSummary])
+async def list_documents() -> list[DocumentSummary]:
+    """List tracked documents and their current ingest states for the platform."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Document).order_by(Document.created_at.desc()))
+        documents = result.scalars().all()
+
+    return [
+        DocumentSummary(
+            id=document.id,
+            filename=document.filename,
+            content_type=document.content_type,
+            status=document.status.value,
+            checksum=document.checksum,
+            file_size=document.file_size,
+            error_message=document.error_message,
+            created_at=document.created_at.isoformat() if document.created_at else None,
+            updated_at=document.updated_at.isoformat() if document.updated_at else None,
+        )
+        for document in documents
+    ]
+
+
+@app.get("/api/v1/documents/{document_id}", response_model=DocumentStatusResponse)
+async def get_document_detail(document_id: str) -> DocumentStatusResponse:
+    """Fetch the current lifecycle status for one specific ingested document."""
+    async with AsyncSessionLocal() as session:
+        document = await session.get(Document, document_id)
+        if document is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return DocumentStatusResponse(
+            id=document.id,
+            filename=document.filename,
+            status=document.status.value,
+            error_message=document.error_message,
+        )
+
+
+@app.get("/api/v1/documents/{document_id}/status", response_model=DocumentStatusResponse)
+async def get_document_status(document_id: str) -> DocumentStatusResponse:
+    """Return the document status and any ingest error message for monitoring and UI polling."""
+    return await get_document_detail(document_id)
 
 
 def _trim_context_to_window(context: str, max_tokens: int = settings.CONTEXT_WINDOW_TOKENS) -> str:
