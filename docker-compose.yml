@@ -1,0 +1,117 @@
+version: "3.9"
+
+networks:
+  norvia-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+
+services:
+  # 1. BASE DE DATOS VECTORIAL (Fuente G + Optimizada)
+  db:
+    image: pgvector/pgvector:0.8.7-pg16
+    container_name: norvia-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-norvia}
+      POSTGRES_USER: ${POSTGRES_USER:-norvia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-norvia_secure_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - norvia-network
+
+  # 2. BROKER Y CACHÉ CON PERSISTENCIA (Fuente C)
+  redis:
+    image: redis:7.4-alpine
+    container_name: norvia-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - norvia-network
+
+  # 3. OBSERVABILIDAD Y TRAZAS LLM/OTEL (Fuente G)
+  phoenix:
+    image: arizephoenix/phoenix:version-21
+    container_name: norvia-phoenix
+    ports:
+      - "6006:6006" # Interfaz Web UI para el Agente/Desarrollador
+      - "4317:4317" # Puerto OTel gRPC directo (reemplaza al colector para simplificar el MVP)
+      - "4318:4318" # Puerto OTel HTTP directo
+    environment:
+      - PHOENIX_HOST=0.0.0.0
+      - PHOENIX_PORT=6006
+    networks:
+      - norvia-network
+
+  # 4. BACKEND API (FastAPI)
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile # python:3.12-slim
+    container_name: norvia-api
+    env_file:
+      - .env
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - norvia-network
+
+  # 5. ASYNC WORKER (Celery)
+  worker:
+    build:
+      context: ./apps/worker
+      dockerfile: Dockerfile
+    container_name: norvia-worker
+    env_file:
+      - .env
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.celery_app worker --loglevel=info
+    networks:
+      - norvia-network
+
+  # 6. FRONTEND (React)
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile # Asegúrate de que use node:20-alpine
+    container_name: norvia-web
+    env_file:
+      - .env
+    depends_on:
+      - api
+    ports:
+      - "5173:5173"
+    command: npm run dev -- --host 0.0.0.0
+    networks:
+      - norvia-network
