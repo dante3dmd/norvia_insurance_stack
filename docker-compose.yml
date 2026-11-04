@@ -10,7 +10,7 @@ volumes:
 
 services:
   # 1. BASE DE DATOS VECTORIAL (Fuente G + Optimizada)
-  db:
+  postgres:
     image: pgvector/pgvector:0.8.7-pg16
     container_name: norvia-postgres
     environment:
@@ -71,7 +71,7 @@ services:
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -92,7 +92,7 @@ services:
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy

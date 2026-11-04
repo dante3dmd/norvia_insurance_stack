@@ -11,6 +11,10 @@
 • Decisión: MarkdownNodeParser de LlamaIndex para los archivos Markdown y HierarchicalNodeParser + SentenceSplitter para los archivos txt
 • Justificación: Esto garantiza que las tablas no se rompan y se mantenga la jerarquía visual para los archivos markdown y para los txt es vital usar la relación Padre-Hijo (Parent-Child) donde el sistema busca la cláusula exacta (hijo de 512 tokens), pero le envía al LLM el artículo o sección completa (padre de 2048 tokens) para que no pierda el contexto de la póliza. 
 
+### 1.3 Ventana de contexto
+• Decisión: Debe ser como mínimo de 32K
+• Justificación:  Un contexto amplio reduce drásticamente la degradación de la atención del modelo y le permite procesar el prompt del sistema junto con las reglas de la aseguradora sin saturarse.
+
 ## 2. Política de Rechazo (Evitar Alucinaciones)
 
 • Decisión: Validación en dos capas: Umbral de similitud vectorial estricto (Distancia Coseno \(\le \) 0.35 / Similitud \(\ge \) 0.65) + Validación Estructurada con Pydantic (IsEvidenceSufficient: bool) en el LLM.
@@ -56,7 +60,7 @@ Justificación:
 
 ## 9. Telemetría
 Decisión: Phoenix
-Justificación: Tiene interfaz y la carga mayor del stack recae sobre el RAG y no en la telemetría
+Justificación: Soporte nativo de visualización de hiperparámetros de LLM, tokens y datasets de evaluación de RAG. La carga mayor del stack recae sobre el RAG y no en la telemetría
 
 ## 10. Elección del índice para pgvector entre HNSW y IVFFlat
 Decisión: Phoenix
