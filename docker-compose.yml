@@ -61,11 +61,11 @@ services:
       - norvia-network
 
   # 4. BACKEND API (FastAPI)
-  api:
+  backend:
     build:
-      context: ./apps/api
+      context: ./backend
       dockerfile: Dockerfile # python:3.12-slim
-    container_name: norvia-api
+    container_name: norvia-backend
     env_file:
       - .env
     environment:
@@ -84,7 +84,7 @@ services:
   # 5. ASYNC WORKER (Celery)
   worker:
     build:
-      context: ./apps/worker
+      context: ./worker
       dockerfile: Dockerfile
     container_name: norvia-worker
     env_file:
@@ -101,15 +101,15 @@ services:
       - norvia-network
 
   # 6. FRONTEND (React)
-  web:
+  frontend:
     build:
-      context: ./apps/web
+      context: ./frontend
       dockerfile: Dockerfile # Asegúrate de que use node:20-alpine
-    container_name: norvia-web
+    container_name: norvia-frontend
     env_file:
       - .env
     depends_on:
-      - api
+      - backend
     ports:
       - "5173:5173"
     command: npm run dev -- --host 0.0.0.0
