@@ -37,6 +37,10 @@ from worker.app.celery_app import celery_app
 tracer = trace.get_tracer("norvia.worker")
 
 
+class PermanentDocumentError(ValueError):
+    """Represent invalid or empty document content that cannot succeed on retry."""
+
+
 def _checksum_bytes(data: bytes) -> str:
     """Compute a SHA-256 checksum so identical uploads are rejected as duplicates."""
     return hashlib.sha256(data).hexdigest()
@@ -52,7 +56,10 @@ def _extract_pdf_text_safely(file_path: str | Path) -> str:
     if pymupdf4llm is None:
         raise RuntimeError("PyMuPDF4LLM is required to convert PDFs to markdown before ingestion.")
 
-    markdown_output = pymupdf4llm.to_markdown(str(file_path))
+    try:
+        markdown_output = pymupdf4llm.to_markdown(str(file_path))
+    except Exception as exc:
+        raise PermanentDocumentError("No se pudo leer el PDF; puede estar corrupto o protegido.") from exc
     if isinstance(markdown_output, dict):
         for key in ("markdown", "text", "content", "output"):
             value = markdown_output.get(key)
@@ -215,10 +222,10 @@ def _extract_text_for_document(document_id: str, filename: str, payload: bytes) 
         temp_path.write_bytes(payload)
         return _extract_pdf_text_safely(temp_path)
 
-    raise ValueError(f"Unsupported document type for ingestion: {filename}")
+    raise PermanentDocumentError(f"Unsupported document type for ingestion: {filename}")
 
 
-@celery_app.task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={"max_retries": 4})
+@celery_app.task(bind=True, max_retries=4, default_retry_delay=1)
 def process_document_task(self: Task, document_id: str) -> str:
     """Celery task that handles document extraction, chunking, embeddings, and persistence with retries."""
     headers = {str(key): str(value) for key, value in (self.request.headers or {}).items()}
@@ -226,10 +233,10 @@ def process_document_task(self: Task, document_id: str) -> str:
     with tracer.start_as_current_span("celery.process_document_task", context=parent_context, kind=SpanKind.CONSUMER) as span:
         span.set_attribute("celery.task.name", process_document_task.name)
         span.set_attribute("document.id", document_id)
-        return _process_document_task_impl(document_id)
+        return _process_document_task_impl(document_id, task=self)
 
 
-def _process_document_task_impl(document_id: str) -> str:
+def _process_document_task_impl(document_id: str, task: Any | None = None) -> str:
     """Execute the ingest flow and record a failure state when processing collapses."""
     try:
         document = asyncio.run(_fetch_document(document_id))
@@ -249,9 +256,9 @@ def _process_document_task_impl(document_id: str) -> str:
             return f"Document {document_id} skipped: duplicate checksum already completed"
 
         text = _extract_text_for_document(document_id, document.filename, file_bytes)
-        chunks = chunk_text(text)
+        chunks = chunk_text(text, source_type=Path(document.filename).suffix.lstrip("."))
         if not chunks:
-            raise ValueError("No extractable text was found in the uploaded document.")
+            raise PermanentDocumentError("El documento está vacío o no contiene texto extraíble.")
 
         embedding_provider = get_embedding_provider()
         embedded_chunks: list[dict[str, Any]] = []
@@ -259,7 +266,7 @@ def _process_document_task_impl(document_id: str) -> str:
             try:
                 vector = embedding_provider.embed(chunk["text"])
             except Exception as exc:
-                raise Retry() from exc
+                raise RuntimeError(f"El proveedor de embeddings falló: {exc}") from exc
             embedded_chunks.append({**chunk, "embedding": vector})
 
         asyncio.run(_bulk_insert_chunks(document_id, embedded_chunks))
@@ -267,6 +274,18 @@ def _process_document_task_impl(document_id: str) -> str:
         return f"Processed document {document_id} with {len(embedded_chunks)} chunks"
     except Retry:
         raise
-    except Exception as exc:
+    except PermanentDocumentError as exc:
         asyncio.run(_set_document_status(document_id, DocumentStatus.FAILED, str(exc)))
-        raise Retry() from exc
+        raise
+    except Exception as exc:
+        if task is None:
+            asyncio.run(_set_document_status(document_id, DocumentStatus.FAILED, str(exc)))
+            raise
+
+        retry_count = task.request.retries
+        if retry_count >= task.max_retries:
+            asyncio.run(_set_document_status(document_id, DocumentStatus.FAILED, str(exc)))
+            raise
+
+        asyncio.run(_set_document_status(document_id, DocumentStatus.PROCESSING, str(exc)))
+        raise task.retry(exc=exc, countdown=2**retry_count)

@@ -1,3 +1,8 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings
@@ -49,6 +54,35 @@ def test_chat_endpoint_returns_structured_response(monkeypatch):
     assert data["answer"]
     assert data["citations"][0]["document_id"] == "doc-1"
     ChatResponse.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    ("provider_error", "expected_status", "expected_code"),
+    [
+        (httpx.TimeoutException("provider timeout"), 504, "llm_timeout"),
+        (httpx.ConnectError("connection refused"), 502, "llm_provider_error"),
+        (RuntimeError("unexpected provider failure"), 502, "llm_provider_error"),
+    ],
+)
+def test_chat_endpoint_returns_structured_provider_errors(
+    monkeypatch,
+    provider_error,
+    expected_status,
+    expected_code,
+):
+    """Keep provider outages and timeouts in a stable API error envelope."""
+    monkeypatch.setattr(
+        "app.main.retrieve_chunks",
+        AsyncMock(return_value=[{"document_id": "doc-1", "chunk": "Cobertura relevante.", "page": 1, "score": 0.9}]),
+    )
+    failing_llm = SimpleNamespace(generate=Mock(side_effect=provider_error))
+    monkeypatch.setattr("app.main.get_llm_provider", lambda: failing_llm)
+
+    response = TestClient(app).post("/api/v1/chat", json={"question": "¿Qué cubre?"})
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"]["code"] == expected_code
+    assert response.json()["detail"]["message"]
 
 
 def test_fake_provider_end_to_end_upload_and_chat_flow(monkeypatch):

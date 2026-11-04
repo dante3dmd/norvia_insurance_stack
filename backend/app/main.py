@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 
+import httpx
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from opentelemetry import propagate, trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -286,5 +287,18 @@ async def chat(
     with tracer.start_as_current_span("llm.generate", kind=SpanKind.CLIENT) as span:
         span.set_attribute("llm.provider", type(llm).__name__)
         span.set_attribute("llm.prompt_chars", len(prompt))
-        raw_response = llm.generate(prompt)
+        try:
+            raw_response = llm.generate(prompt)
+        except httpx.TimeoutException as exc:
+            span.record_exception(exc)
+            raise HTTPException(
+                status_code=504,
+                detail={"code": "llm_timeout", "message": "El proveedor de lenguaje agotó el tiempo de espera. Reintenta la consulta."},
+            ) from exc
+        except Exception as exc:
+            span.record_exception(exc)
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "llm_provider_error", "message": "No se pudo completar la consulta con el proveedor de lenguaje."},
+            ) from exc
     return _parse_llm_response(raw_response, citations)

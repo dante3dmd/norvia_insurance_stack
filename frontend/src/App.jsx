@@ -18,6 +18,14 @@ async function fetchDocuments() {
   return response.json();
 }
 
+// Extract a human-readable message from either string or structured API error details.
+function getApiErrorMessage(payload, fallback) {
+  const detail = payload?.detail;
+  if (typeof detail === 'string') return detail;
+  if (typeof detail?.message === 'string') return detail.message;
+  return fallback;
+}
+
 // Upload a selected PDF to the FastAPI ingest endpoint and return the server response.
 async function uploadDocument(file) {
   const formData = new FormData();
@@ -30,7 +38,7 @@ async function uploadDocument(file) {
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.detail || 'Error al subir el documento');
+    throw new Error(getApiErrorMessage(payload, 'Error al subir el documento'));
   }
 
   return response.json();
@@ -146,7 +154,7 @@ export default function App() {
 
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.detail || 'La consulta no pudo completarse');
+        throw new Error(getApiErrorMessage(payload, 'La consulta no pudo completarse'));
       }
 
       const payload = await response.json();
@@ -259,6 +267,9 @@ export default function App() {
                             <td className="px-3 py-3">
                               <div className="font-medium text-white">{document.filename}</div>
                               <div className="text-xs text-slate-400">{document.content_type}</div>
+                              {document.status === 'failed' && document.error_message && (
+                                <div className="mt-1 max-w-xs text-xs text-rose-300">{document.error_message}</div>
+                              )}
                             </td>
                             <td className="px-3 py-3">
                               <span

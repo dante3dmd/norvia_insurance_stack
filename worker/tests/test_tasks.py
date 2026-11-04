@@ -1,3 +1,9 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+from celery.exceptions import Retry
+
 import worker.app.tasks as tasks
 
 
@@ -75,3 +81,94 @@ def test_extract_text_for_document_uses_pymupdf4llm_for_pdf(monkeypatch, tmp_pat
 
     assert result.startswith("# Cobertura")
     assert captured["path"].lower().endswith(".pdf")
+
+
+def test_corrupt_pdf_raises_a_permanent_error(monkeypatch, tmp_path):
+    """Verify corrupt PDFs fail with a user-readable cause instead of entering retries."""
+    monkeypatch.setattr(
+        tasks,
+        "pymupdf4llm",
+        SimpleNamespace(to_markdown=Mock(side_effect=RuntimeError("invalid xref"))),
+    )
+
+    with pytest.raises(tasks.PermanentDocumentError, match="corrupto o protegido"):
+        tasks._extract_pdf_text_safely(tmp_path / "corrupt.pdf")
+
+
+def test_empty_document_is_marked_failed_with_a_cause(monkeypatch):
+    """Ensure a PDF with no extractable text fails immediately and stores its reason."""
+    document = SimpleNamespace(status=tasks.DocumentStatus.PENDING, checksum=None, filename="empty.pdf")
+    set_status = AsyncMock()
+    monkeypatch.setattr(tasks, "_fetch_document", AsyncMock(return_value=document))
+    monkeypatch.setattr(tasks, "_set_document_status", set_status)
+    monkeypatch.setattr(tasks, "read_document_file", lambda *_: b"empty pdf")
+    monkeypatch.setattr(tasks, "_completed_checksum_exists", AsyncMock(return_value=False))
+    monkeypatch.setattr(tasks, "_extract_text_for_document", lambda *_: "")
+
+    with pytest.raises(tasks.PermanentDocumentError, match="vacío o no contiene texto"):
+        tasks._process_document_task_impl("doc-empty")
+
+    assert set_status.await_args_list[-1].args == (
+        "doc-empty",
+        tasks.DocumentStatus.FAILED,
+        "El documento está vacío o no contiene texto extraíble.",
+    )
+
+
+def test_embedding_failure_uses_exponential_celery_retry(monkeypatch):
+    """Check transient embedding failures are rescheduled by Celery with exponential delay."""
+    document = SimpleNamespace(status=tasks.DocumentStatus.PENDING, checksum=None, filename="policy.pdf")
+    set_status = AsyncMock()
+    retry = Mock(side_effect=Retry())
+    task = SimpleNamespace(request=SimpleNamespace(retries=2), max_retries=4, retry=retry)
+    monkeypatch.setattr(tasks, "_fetch_document", AsyncMock(return_value=document))
+    monkeypatch.setattr(tasks, "_set_document_status", set_status)
+    monkeypatch.setattr(tasks, "read_document_file", lambda *_: b"pdf")
+    monkeypatch.setattr(tasks, "_completed_checksum_exists", AsyncMock(return_value=False))
+    monkeypatch.setattr(tasks, "_extract_text_for_document", lambda *_: "contenido")
+    monkeypatch.setattr(tasks, "chunk_text", lambda *args, **kwargs: [{"text": "contenido"}])
+    monkeypatch.setattr(
+        tasks,
+        "get_embedding_provider",
+        lambda: SimpleNamespace(embed=Mock(side_effect=TimeoutError("embedding timeout"))),
+    )
+
+    with pytest.raises(Retry):
+        tasks._process_document_task_impl("doc-retry", task=task)
+
+    retry.assert_called_once()
+    assert retry.call_args.kwargs["countdown"] == 4
+    assert set_status.await_args_list[-1].args == (
+        "doc-retry",
+        tasks.DocumentStatus.PROCESSING,
+        "El proveedor de embeddings falló: embedding timeout",
+    )
+
+
+def test_exhausted_embedding_retries_mark_document_failed(monkeypatch):
+    """Persist the provider failure as the final document cause after Celery exhausts retries."""
+    document = SimpleNamespace(status=tasks.DocumentStatus.PENDING, checksum=None, filename="policy.pdf")
+    set_status = AsyncMock()
+    retry = Mock()
+    task = SimpleNamespace(request=SimpleNamespace(retries=4), max_retries=4, retry=retry)
+    monkeypatch.setattr(tasks, "_fetch_document", AsyncMock(return_value=document))
+    monkeypatch.setattr(tasks, "_set_document_status", set_status)
+    monkeypatch.setattr(tasks, "read_document_file", lambda *_: b"pdf")
+    monkeypatch.setattr(tasks, "_completed_checksum_exists", AsyncMock(return_value=False))
+    monkeypatch.setattr(tasks, "_extract_text_for_document", lambda *_: "contenido")
+    monkeypatch.setattr(tasks, "chunk_text", lambda *args, **kwargs: [{"text": "contenido"}])
+    monkeypatch.setattr(
+        tasks,
+        "get_embedding_provider",
+        lambda: SimpleNamespace(embed=Mock(side_effect=TimeoutError("embedding timeout"))),
+    )
+
+    with pytest.raises(RuntimeError, match="embedding timeout"):
+        tasks._process_document_task_impl("doc-failed", task=task)
+
+    retry.assert_not_called()
+    assert set_status.await_args_list[-1].args == (
+        "doc-failed",
+        tasks.DocumentStatus.FAILED,
+        "El proveedor de embeddings falló: embedding timeout",
+    )
