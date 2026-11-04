@@ -187,6 +187,16 @@ def _trim_context_to_window(context: str, max_tokens: int = settings.CONTEXT_WIN
     return " ".join(words[:max_tokens])
 
 
+def _build_chat_prompt(question: str, context: str) -> str:
+    """Assemble the retrieval-grounded prompt that instructs the model to answer only from retrieved evidence."""
+    return (
+        "Responde ÚNICAMENTE con un JSON válido con estas claves: answer, citations, has_sufficient_evidence. "
+        "Si no hay evidencia suficiente, responde con has_sufficient_evidence=false y un texto de rechazo explícito. "
+        "Nunca inventes una respuesta. Usa el siguiente contexto para fundamentar tu respuesta:\n\n"
+        f"{context}\n\nPregunta del usuario: {question}"
+    )
+
+
 def _build_rejection_response(citations: list[Citation], question: str) -> ChatResponse:
     """Return a clear refusal when the retrieval score or evidence is insufficient."""
     return ChatResponse(
@@ -272,12 +282,7 @@ async def chat(
     context = _trim_context_to_window(context, settings.CONTEXT_WINDOW_TOKENS)
 
     llm = get_llm_provider()
-    prompt = (
-        "Responde ÚNICAMENTE con un JSON válido con estas claves: answer, citations, has_sufficient_evidence. "
-        "Si no hay evidencia suficiente, responde con has_sufficient_evidence=false y un texto de rechazo explícito. "
-        "Nunca inventes una respuesta. Usa el siguiente contexto para fundamentar tu respuesta:\n\n"
-        f"{context}\n\nPregunta del usuario: {payload.question}"
-    )
+    prompt = _build_chat_prompt(payload.question, context)
     with tracer.start_as_current_span("llm.generate", kind=SpanKind.CLIENT) as span:
         span.set_attribute("llm.provider", type(llm).__name__)
         span.set_attribute("llm.prompt_chars", len(prompt))
