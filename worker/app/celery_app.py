@@ -9,6 +9,7 @@ BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
+# Celery acts as the async ingest worker; Redis is the broker and result backend hosting job dispatch and retry coordination.
 celery_app = Celery(
     "norvia_worker",
     broker=os.getenv("REDIS_URL", "redis://localhost:6379/0"),

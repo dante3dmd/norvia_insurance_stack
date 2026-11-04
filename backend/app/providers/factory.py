@@ -8,6 +8,7 @@ from .real import LiteLLMEmbeddingProvider, LiteLLMProvider
 
 
 def get_llm_provider() -> BaseLLMProvider:
+    """Instantiate the configured LLM adapter, defaulting to the deterministic fake provider for local work."""
     provider_name = os.getenv("LLM_PROVIDER", "fake").lower()
     if provider_name == "fake":
         return FakeLLMProvider()
@@ -17,6 +18,7 @@ def get_llm_provider() -> BaseLLMProvider:
 
 
 def get_embedding_provider() -> BaseEmbeddingProvider:
+    """Instantiate the configured embedding adapter so retrieval uses the right vector backend."""
     provider_name = os.getenv("EMBEDDING_PROVIDER", "fake").lower()
     if provider_name == "fake":
         return FakeEmbeddingProvider()

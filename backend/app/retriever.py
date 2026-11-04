@@ -18,12 +18,14 @@ class RetrievalSpan(AbstractContextManager):
     """OpenInference-style span that wraps vector retrieval and records query metadata for Phoenix."""
 
     def __init__(self, question: str, document_ids: list[str] | None = None, k: int = 5) -> None:
+        """Store the retrieval request metadata before starting an OpenTelemetry span."""
         self.question = question
         self.document_ids = document_ids or []
         self.k = k
         self._span = None
 
     def __enter__(self):
+        """Start the instrumentation span and expose the context manager for the query."""
         self._span = tracer.start_span(
             "RetrievalSpan",
             kind=SpanKind.INTERNAL,
@@ -38,10 +40,12 @@ class RetrievalSpan(AbstractContextManager):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Close the span even if the retrieval fails so traces remain coherent."""
         if self._span is not None:
             self._span.__exit__(exc_type, exc_val, exc_tb)
 
     def add_documents(self, documents: list[dict[str, object]]) -> None:
+        """Attach the final matched chunks to the trace as evidence for the response."""
         if self._span is None:
             return
         self._span.set_attribute("retrieval.documents", json.dumps(documents))

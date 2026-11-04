@@ -5,12 +5,13 @@ import json
 import re
 
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
-from opentelemetry import trace
+from opentelemetry import propagate, trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.trace import SpanKind
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +44,24 @@ def setup_telemetry() -> TracerProvider|None:
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     return provider
+
+
+tracer = trace.get_tracer("norvia.api")
+
+
+def _build_celery_headers() -> dict[str, str]:
+    """Inject the current tracing context so the async worker continues the same distributed trace."""
+    carrier: dict[str, str] = {}
+    propagate.inject(carrier)
+    return carrier
+
+
+def _enqueue_document_task(document_id: str) -> None:
+    """Queue the Celery ingestion job while remaining compatible with the test stubs that use delay()."""
+    if hasattr(process_document_task, "apply_async"):
+        process_document_task.apply_async(args=[document_id], headers=_build_celery_headers())
+        return
+    process_document_task.delay(document_id)
 
 
 app = FastAPI(title="Norvia Insurance API", version="0.1.0")
@@ -104,7 +123,7 @@ async def upload_document(
         await session.refresh(document)
 
     save_document_file(document.id, document.filename, file_bytes)
-    process_document_task.delay(document.id)
+    _enqueue_document_task(document.id)
     return DocumentUploadResponse(
         id=document.id,
         filename=document.filename,
@@ -259,5 +278,8 @@ async def chat(
         "Nunca inventes una respuesta. Usa el siguiente contexto para fundamentar tu respuesta:\n\n"
         f"{context}\n\nPregunta del usuario: {payload.question}"
     )
-    raw_response = llm.generate(prompt)
+    with tracer.start_as_current_span("llm.generate", kind=SpanKind.CLIENT) as span:
+        span.set_attribute("llm.provider", type(llm).__name__)
+        span.set_attribute("llm.prompt_chars", len(prompt))
+        raw_response = llm.generate(prompt)
     return _parse_llm_response(raw_response, citations)

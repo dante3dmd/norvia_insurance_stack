@@ -9,6 +9,8 @@ from typing import Any
 
 from celery import Task
 from celery.exceptions import Retry
+from opentelemetry import propagate, trace
+from opentelemetry.trace import SpanKind
 from sqlalchemy import select
 
 try:
@@ -31,6 +33,8 @@ from app.db.session import AsyncSessionLocal
 from app.providers.factory import get_embedding_provider
 from app.storage import read_document_file
 from worker.app.celery_app import celery_app
+
+tracer = trace.get_tracer("norvia.worker")
 
 
 def _checksum_bytes(data: bytes) -> str:
@@ -217,7 +221,12 @@ def _extract_text_for_document(document_id: str, filename: str, payload: bytes) 
 @celery_app.task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={"max_retries": 4})
 def process_document_task(self: Task, document_id: str) -> str:
     """Celery task that handles document extraction, chunking, embeddings, and persistence with retries."""
-    return _process_document_task_impl(document_id)
+    headers = {str(key): str(value) for key, value in (self.request.headers or {}).items()}
+    parent_context = propagate.extract(headers)
+    with tracer.start_as_current_span("celery.process_document_task", context=parent_context, kind=SpanKind.CONSUMER) as span:
+        span.set_attribute("celery.task.name", process_document_task.name)
+        span.set_attribute("document.id", document_id)
+        return _process_document_task_impl(document_id)
 
 
 def _process_document_task_impl(document_id: str) -> str:
