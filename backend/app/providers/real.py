@@ -22,9 +22,11 @@ class LiteLLMProvider(BaseLLMProvider):
         self.api_key = api_key or os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.base_url = base_url or os.getenv("REAL_LLM_BASE_URL", "https://api.openai.com/v1")
         self.timeout = timeout
+        self.last_usage: dict[str, int] = {}
 
     def generate(self, prompt: str, **kwargs) -> str:
         """Send a prompt to the configured chat-completions API and return the model text."""
+        self.last_usage = {}
         if not self.api_key:
             raise RuntimeError("No API key configured for the real LLM provider.")
 
@@ -46,6 +48,12 @@ class LiteLLMProvider(BaseLLMProvider):
         )
         response.raise_for_status()
         data = response.json()
+        usage = data.get("usage") or {}
+        self.last_usage = {
+            key: usage[key]
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+            if isinstance(usage.get(key), int) and usage[key] >= 0
+        }
         return data["choices"][0]["message"]["content"]
 
 

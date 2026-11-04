@@ -30,11 +30,13 @@ except ModuleNotFoundError:  # pragma: no cover - optional for local/test fallba
 
 from app.db.models import Document as SqlAlchemyDocument, DocumentChunk, DocumentStatus
 from app.db.session import AsyncSessionLocal
+from app.observability import get_observability_logger, log_event
 from app.providers.factory import get_embedding_provider
 from app.storage import read_document_file
 from worker.app.celery_app import celery_app
 
 tracer = trace.get_tracer("norvia.worker")
+logger = get_observability_logger()
 
 
 class PermanentDocumentError(ValueError):
@@ -232,7 +234,7 @@ def process_document_task(self: Task, document_id: str) -> str:
     parent_context = propagate.extract(headers)
     with tracer.start_as_current_span("celery.process_document_task", context=parent_context, kind=SpanKind.CONSUMER) as span:
         span.set_attribute("celery.task.name", process_document_task.name)
-        span.set_attribute("document.id", document_id)
+        log_event(logger, "ingest.started", retry_count=self.request.retries)
         return _process_document_task_impl(document_id, task=self)
 
 
@@ -271,21 +273,32 @@ def _process_document_task_impl(document_id: str, task: Any | None = None) -> st
 
         asyncio.run(_bulk_insert_chunks(document_id, embedded_chunks))
         asyncio.run(_set_document_status(document_id, DocumentStatus.COMPLETED))
+        log_event(logger, "ingest.completed", chunk_count=len(embedded_chunks))
         return f"Processed document {document_id} with {len(embedded_chunks)} chunks"
     except Retry:
         raise
     except PermanentDocumentError as exc:
         asyncio.run(_set_document_status(document_id, DocumentStatus.FAILED, str(exc)))
+        log_event(logger, "ingest.failed", failure_category="invalid_document", error_type=type(exc).__name__)
         raise
     except Exception as exc:
         if task is None:
             asyncio.run(_set_document_status(document_id, DocumentStatus.FAILED, str(exc)))
+            log_event(logger, "ingest.failed", failure_category="unhandled", error_type=type(exc).__name__)
             raise
 
         retry_count = task.request.retries
         if retry_count >= task.max_retries:
             asyncio.run(_set_document_status(document_id, DocumentStatus.FAILED, str(exc)))
+            log_event(logger, "ingest.failed", failure_category="retries_exhausted", error_type=type(exc).__name__)
             raise
 
         asyncio.run(_set_document_status(document_id, DocumentStatus.PROCESSING, str(exc)))
+        log_event(
+            logger,
+            "ingest.retry_scheduled",
+            retry_count=retry_count + 1,
+            retry_delay_seconds=2**retry_count,
+            error_type=type(exc).__name__,
+        )
         raise task.retry(exc=exc, countdown=2**retry_count)

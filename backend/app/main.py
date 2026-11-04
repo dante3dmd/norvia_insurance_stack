@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 
 import httpx
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db.models import Document, DocumentStatus
 from app.db.session import AsyncSessionLocal, init_db
+from app.observability import get_observability_logger, log_event
 from app.providers.factory import get_llm_provider
 from app.rate_limit import extract_user_id, rate_limiter
 from app.retriever import retrieve_chunks
@@ -48,6 +50,7 @@ def setup_telemetry() -> TracerProvider|None:
 
 
 tracer = trace.get_tracer("norvia.api")
+logger = get_observability_logger()
 
 
 def _build_celery_headers() -> dict[str, str]:
@@ -281,24 +284,57 @@ async def chat(
         for index, hit in enumerate(hits)
     )
     context = _trim_context_to_window(context, settings.CONTEXT_WINDOW_TOKENS)
+    context_chars = len(context)
+    context_tokens_estimate = len(context.split())
 
     llm = get_llm_provider()
     prompt = _build_chat_prompt(payload.question, context)
     with tracer.start_as_current_span("llm.generate", kind=SpanKind.CLIENT) as span:
         span.set_attribute("llm.provider", type(llm).__name__)
         span.set_attribute("llm.prompt_chars", len(prompt))
+        span.set_attribute("llm.context_chars", context_chars)
+        span.set_attribute("llm.context_tokens_estimate", context_tokens_estimate)
+        span.set_attribute("llm.context_chunk_count", len(hits))
+        span.set_attribute("llm.context_window_tokens", settings.CONTEXT_WINDOW_TOKENS)
+        llm_started = time.perf_counter()
         try:
             raw_response = llm.generate(prompt)
         except httpx.TimeoutException as exc:
-            span.record_exception(exc)
+            span.set_attribute("error.type", type(exc).__name__)
+            log_event(logger, "llm.failed", provider=type(llm).__name__, error_type=type(exc).__name__)
             raise HTTPException(
                 status_code=504,
                 detail={"code": "llm_timeout", "message": "El proveedor de lenguaje agotó el tiempo de espera. Reintenta la consulta."},
             ) from exc
         except Exception as exc:
-            span.record_exception(exc)
+            span.set_attribute("error.type", type(exc).__name__)
+            log_event(logger, "llm.failed", provider=type(llm).__name__, error_type=type(exc).__name__)
             raise HTTPException(
                 status_code=502,
                 detail={"code": "llm_provider_error", "message": "No se pudo completar la consulta con el proveedor de lenguaje."},
             ) from exc
+        llm_duration_ms = (time.perf_counter() - llm_started) * 1000
+        span.set_attribute("llm.duration_ms", llm_duration_ms)
+        span.set_attribute("llm.response_chars", len(raw_response))
+        span.set_attribute("llm.prompt_tokens_estimate", len(prompt.split()))
+        usage = getattr(llm, "last_usage", None)
+        if isinstance(usage, dict):
+            for usage_key, span_key in (
+                ("prompt_tokens", "llm.prompt_tokens"),
+                ("completion_tokens", "llm.completion_tokens"),
+                ("total_tokens", "llm.total_tokens"),
+            ):
+                token_count = usage.get(usage_key)
+                if isinstance(token_count, int) and token_count >= 0:
+                    span.set_attribute(span_key, token_count)
+        log_event(
+            logger,
+            "llm.completed",
+            provider=type(llm).__name__,
+            duration_ms=round(llm_duration_ms, 3),
+            context_chars=context_chars,
+            context_tokens_estimate=context_tokens_estimate,
+            context_chunk_count=len(hits),
+            response_chars=len(raw_response),
+        )
     return _parse_llm_response(raw_response, citations)

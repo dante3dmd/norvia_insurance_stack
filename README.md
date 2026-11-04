@@ -1,5 +1,13 @@
 # Norvia Insurance Stack
 
+## Observabilidad
+
+La API y el worker exportan trazas OpenTelemetry a Phoenix (`http://localhost:6006` en el stack local). Los logs de aplicación se emiten como JSON e incluyen `trace_id` y `span_id` cuando hay una traza activa, para correlacionar eventos entre servicios.
+
+Las trazas registran latencias de embedding, consulta vectorial y generación del LLM; conteos de resultados, tamaño del contexto y chunks; y tokens reales reportados por el proveedor. En proveedores sin contadores se informa una estimación separada, no un uso real.
+
+Por privacidad, no se adjuntan preguntas, prompts, respuestas ni texto de chunks a spans o logs. La recuperación registra únicamente tamaños, conteos y scores agregados.
+
 ## Evaluación mínima de recuperación
 
 Este repositorio incluye una mini evaluación de recuperación para comprobar que el motor vectorial encuentra los fragmentos esperados con un conjunto pequeño y determinista de preguntas.
