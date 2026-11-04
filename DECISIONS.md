@@ -3,7 +3,6 @@
 
 ## 1. Estrategia de Chunking y Tamaño de Contexto
 
-PyMuPDF4LLM convierte el PDF a Markdown respetando tablas, títulos y listas. LlamaIndex lee de forma nativa estructurando los bloques de texto según la sintaxis de Markdown.
 ### 1.1 Extracción
 • Decisión: Usar PyMuPDF4LLM para llevar los PDF a markdown.
 • Justificación: PyMuPDF4LLM posee análisis de estructural del documento y convierte el PDF a Markdown respetando tablas, títulos y listas. 
